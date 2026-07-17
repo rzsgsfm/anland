@@ -13,6 +13,8 @@ import android.hardware.display.DisplayManager;
 import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.Display;
 import android.view.Gravity;
@@ -32,6 +34,8 @@ import android.widget.FrameLayout;
 import android.util.DisplayMetrics;   // ADDED
 
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 
 public class MainActivity extends Activity
@@ -42,14 +46,14 @@ public class MainActivity extends Activity
     private boolean surfaceReady = false;
     // System-clipboard bridge; also the target for the native clipboard callbacks.
     private Clipboard clipboard;
-    private static final String PREFS_NAME = "anland_settings";
+    private static final String PREFS_NAME = Prefs.NAME;
     private int customScreenWidth = 0;
     private int customScreenHeight = 0;
     private int viewWidth = 0;
     private int viewHeight = 0;
     private static final String KEY_BOUND_KEYCODE = "bound_keycode";
     private static final String KEY_SOCKET_PATH = "socket_path";
-    private static final String KEY_USE_ROOT = "use_root";
+    private static final String KEY_USE_ROOT = Prefs.USE_ROOT;
     private static final String KEY_MIC_ENABLED = "mic_enabled";
     private static final String KEY_CAMERA_ENABLED = "camera_enabled";
     // Latency presets in ms; 0 = engine default. Shared with SettingsActivity.
@@ -82,7 +86,7 @@ public class MainActivity extends Activity
     // Set when onCreate found the target socket missing and bounced to Settings
     // (no pipeline was ever initialized). Makes onPause/onResume no-op-and-exit.
     private boolean mForceSettings = false;
-    private static final String KEY_ACCESSIBILITY_ENABLED = "accessibility_key_intercept";
+    private static final String KEY_ACCESSIBILITY_ENABLED = Prefs.ACCESSIBILITY_ENABLED;
     private static final String KEY_EXTRA_KEYS_ENABLED = "extra_keys_bar";
     private static final String KEY_AUTO_SHOW_EXTRA_KEYS = "auto_show_extra_keys";
     private static final String KEY_BACK_OPENS_EXTRA_KEYS = "back_opens_extra_keys";
@@ -103,6 +107,15 @@ public class MainActivity extends Activity
     private float mDensity = 1f;
     // Layout JSON the current bar was built from; used to detect edits on resume.
     private String mAppliedLayoutJson = "";
+    private boolean mAccessibilityRootUpdating = false;
+    private final ExecutorService mSystemBarExecutor = Executors.newSingleThreadExecutor();
+    private boolean mEmergencyUnlocking = false;
+    private long mLastFiveFingerExit = 0L;
+    private final Handler mLifecycleHandler = new Handler(Looper.getMainLooper());
+    private final Runnable mDeferredSystemBarRestore = () -> {
+        if (!isDesktopControlTaskOnTop()) updateSystemBarLock(false);
+    };
+    private final Runnable mRehideSystemBars = this::setupFullscreen;
 
     public static MainActivity sInstance;
 
@@ -143,7 +156,7 @@ public class MainActivity extends Activity
         runOnUiThread(() -> {
             if (!isSocketFile(resolveSocketPath())) {
                 //exit
-                android.widget.Toast.makeText(this, "Deamon Down",
+                android.widget.Toast.makeText(this, "Daemon Down",
                         android.widget.Toast.LENGTH_SHORT).show();
                 finish();
             }
@@ -155,7 +168,7 @@ public class MainActivity extends Activity
         super.onWindowFocusChanged(hasFocus);
         if (!isSocketFile(resolveSocketPath())) {
             //exit
-            android.widget.Toast.makeText(this, "Deamon Down",
+            android.widget.Toast.makeText(this, "Daemon Down",
                     android.widget.Toast.LENGTH_SHORT).show();
             finish();
         }
@@ -164,6 +177,8 @@ public class MainActivity extends Activity
             // camera frames route to this window (others get blank frames).
             sInstance = this;
             if (mNative != null) mNative.setFocused(true);
+            setupFullscreen();
+            if (!mEmergencyUnlocking) updateSystemBarLock(true);
         }
         if (hasFocus && clipboard != null) {
             clipboard.pushClipboard();
@@ -212,7 +227,7 @@ public class MainActivity extends Activity
     // re-check on every (re)connect; if it is gone, report it and exit the window.
     private void startNative(android.view.Surface surface) {
         if (!isSocketFile(resolveSocketPath())) {
-            android.widget.Toast.makeText(this, "Deamon Down",
+            android.widget.Toast.makeText(this, "Daemon Down",
                     android.widget.Toast.LENGTH_SHORT).show();
             finish();
             return;
@@ -240,6 +255,11 @@ public class MainActivity extends Activity
             android.system.StructStat st = android.system.Os.stat(path);
             return android.system.OsConstants.S_ISSOCK(st.st_mode);
         } catch (android.system.ErrnoException e) {
+            // 权限不足（EACCES）时，假定 socket 存在（常见于容器/root 环境）
+            if (e.errno == android.system.OsConstants.EACCES) {
+                return true;
+            }
+            // 其他错误（如 ENOENT 文件不存在）按实际情况返回 false
             return false;
         }
     }
@@ -327,6 +347,7 @@ public class MainActivity extends Activity
         clipboard = new Clipboard(this, mNative);
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
         // Take over inset handling: the IME insets are dispatched to our
         // OnApplyWindowInsetsListener (so we can resize the surface) instead of
@@ -388,6 +409,7 @@ public class MainActivity extends Activity
                 }
             }
         });
+
         // Positioning happens lazily the first time the keyboard is shown
         // (see toggleVirtualKeyboard). Positioning it here would spin forever:
         // the view starts GONE and a GONE view is never measured.
@@ -402,6 +424,12 @@ public class MainActivity extends Activity
             if (!insets.isVisible(WindowInsets.Type.ime()))
                 systemIme.releaseHiddenInput();
             applyImeInset(insets);
+            if (isSystemBarLockEnabled()
+                    && (insets.isVisible(WindowInsets.Type.statusBars())
+                    || insets.isVisible(WindowInsets.Type.navigationBars()))) {
+                mLifecycleHandler.removeCallbacks(mRehideSystemBars);
+                mLifecycleHandler.postDelayed(mRehideSystemBars, 50);
+            }
             return v.onApplyWindowInsets(insets);
         });
 
@@ -490,14 +518,83 @@ public class MainActivity extends Activity
     }
 
     private void setupFullscreen() {
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
         WindowInsetsController ctrl = getWindow().getInsetsController();
         if (ctrl != null) {
             ctrl.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+            boolean blockBars = isSystemBarLockEnabled();
             ctrl.setSystemBarsBehavior(
-                WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                    blockBars ? WindowInsetsController.BEHAVIOR_DEFAULT
+                            : WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
         }
         getWindow().getAttributes().layoutInDisplayCutoutMode =
             WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+    }
+
+    boolean isSystemBarLockEnabled() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        return prefs.getBoolean(KEY_USE_ROOT, true)
+                && prefs.getBoolean(Prefs.BLOCK_SYSTEM_BARS,
+                prefs.getBoolean(Prefs.LEGACY_CAPTURE_MOUSE_POINTER, false));
+    }
+
+    private void updateSystemBarLock(boolean foreground) {
+        boolean block = foreground && isSystemBarLockEnabled();
+        mSystemBarExecutor.execute(() -> {
+            RootSettings.Result result = RootSettings.setSystemBarsBlocked(block);
+            if (!result.success)
+                Log.w(TAG, "system bar lock failed: " + result.message);
+            if (result.success && block) {
+                runOnUiThread(() -> {
+                    setupFullscreen();
+                    mLifecycleHandler.removeCallbacks(mRehideSystemBars);
+                    mLifecycleHandler.postDelayed(mRehideSystemBars, 250);
+                    mLifecycleHandler.postDelayed(mRehideSystemBars, 750);
+                });
+            }
+        });
+    }
+
+    private boolean isDesktopControlTaskOnTop() {
+        ActivityManager manager = getSystemService(ActivityManager.class);
+        if (manager == null) return false;
+        java.util.List<ActivityManager.RunningTaskInfo> tasks = manager.getRunningTasks(1);
+        if (tasks.isEmpty() || tasks.get(0).topActivity == null) return false;
+        android.content.ComponentName top = tasks.get(0).topActivity;
+        if (!getPackageName().equals(top.getPackageName())) return false;
+        String className = top.getClassName();
+        return className.equals(MainActivity.class.getName())
+                || className.equals(SecondaryActivity.class.getName());
+    }
+
+    private void emergencyUnlockAndOpenSettings() {
+        if (mEmergencyUnlocking) return;
+        mEmergencyUnlocking = true;
+
+        // Release every possible side of the shortcut modifiers in Linux before
+        // leaving, even if Android delivered some presses through another path.
+        if (mNative != null) {
+            int[] releases = {1, 29, 97, 42, 54, 56, 100};
+            for (int evdev : releases) mNative.sendKey(1, evdev);
+        }
+
+        mSystemBarExecutor.execute(() -> {
+            RootSettings.Result result = RootSettings.setSystemBarsBlocked(false);
+            if (!result.success)
+                Log.w(TAG, "emergency system bar restore failed: " + result.message);
+            runOnUiThread(() -> {
+                startActivity(new Intent(MainActivity.this, SettingsActivity.class));
+                android.widget.Toast.makeText(MainActivity.this,
+                        R.string.lock_mode_released, android.widget.Toast.LENGTH_SHORT).show();
+            });
+        });
     }
 
     private void setupCursorHiding() {
@@ -507,6 +604,8 @@ public class MainActivity extends Activity
     @Override
     protected void onResume() {
         super.onResume();
+        mLifecycleHandler.removeCallbacks(mDeferredSystemBarRestore);
+        mEmergencyUnlocking = false;
 
         // Bounced to Settings from onCreate (socket missing): nothing was set up, so
         // just exit this window instead of running the connect logic.
@@ -532,6 +631,7 @@ public class MainActivity extends Activity
 
         // Re-check accessibility service state on resume
         KeyInterceptor.recheck();
+        ensureAccessibilityService();
 
         // If the user edited the layout JSON in Settings, rebuild the bar so the
         // change takes effect on return to the desktop.
@@ -554,6 +654,7 @@ public class MainActivity extends Activity
         setExtraKeysBarVisible(shouldShowBar(systemIme.isImeVisible()));
 
         setupFullscreen();
+        updateSystemBarLock(true);
         DisplayManager dm = getSystemService(DisplayManager.class);
         if (dm != null)
             dm.registerDisplayListener(displayListener, null);
@@ -586,6 +687,8 @@ public class MainActivity extends Activity
         // Socket-missing bounce: no pipeline exists, so skip teardown (mNative is
         // null) and don't let the jump to Settings trigger any of it.
         if (mForceSettings) return;
+        mLifecycleHandler.removeCallbacks(mDeferredSystemBarRestore);
+        mLifecycleHandler.postDelayed(mDeferredSystemBarRestore, 750);
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (nm != null) nm.cancel(NOTIFICATION_ID);
         DisplayManager dm = getSystemService(DisplayManager.class);
@@ -596,6 +699,8 @@ public class MainActivity extends Activity
 
     @Override
     protected void onDestroy() {
+        mLifecycleHandler.removeCallbacks(mDeferredSystemBarRestore);
+        mLifecycleHandler.removeCallbacks(mRehideSystemBars);
         if (mRegisteredSocket != null) {
             sWindowsBySocket.remove(mRegisteredSocket, this);
             mRegisteredSocket = null;
@@ -611,6 +716,7 @@ public class MainActivity extends Activity
             mNative = null;
         }
         cameraInited = false;
+        mSystemBarExecutor.shutdown();
         super.onDestroy();
     }
 
@@ -895,7 +1001,7 @@ public class MainActivity extends Activity
                 float scaleY = (customScreenHeight > 0 && viewHeight > 0) ? 
                         (float)customScreenHeight / viewHeight : 1.0f;
         
-                mNative.sendMouseMotion(event.getX()*scaleX, event.getY()*scaleY,
+                mNative.sendMouseMotion(event.getX() * scaleX, event.getY() * scaleY,
                                       event.getAxisValue(MotionEvent.AXIS_RELATIVE_X),
                                       event.getAxisValue(MotionEvent.AXIS_RELATIVE_Y));
                 return true;
@@ -914,9 +1020,41 @@ public class MainActivity extends Activity
     }
 
     @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        if (isSystemBarLockEnabled()
+                && event.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN
+                && event.getPointerCount() >= 5) {
+            long now = android.os.SystemClock.uptimeMillis();
+            if (now - mLastFiveFingerExit > 1000) {
+                mLastFiveFingerExit = now;
+                emergencyUnlockAndOpenSettings();
+            }
+            return true;
+        }
+        return super.dispatchTouchEvent(event);
+    }
+
+    static boolean isEmergencyExitShortcut(KeyEvent event) {
+        int keyCode = event.getKeyCode();
+        return keyCode == KeyEvent.KEYCODE_F24
+                || ((keyCode == KeyEvent.KEYCODE_ESCAPE || keyCode == KeyEvent.KEYCODE_BACK)
+                && event.isCtrlPressed() && event.isAltPressed() && event.isShiftPressed());
+    }
+
+    @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (event.getRepeatCount() > 0)
             return true;
+
+        if (isSystemBarLockEnabled() && isEmergencyExitShortcut(event)) {
+            emergencyUnlockAndOpenSettings();
+            return true;
+        }
+
+        if (isAccessibilityInterceptEnabled()
+                && isConfigurableInterceptKey(event)
+                && !shouldAccessibilityIntercept(event))
+            return super.onKeyDown(keyCode, event);
 
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         int boundKeycode = prefs.getInt(KEY_BOUND_KEYCODE, -1);
@@ -933,18 +1071,7 @@ public class MainActivity extends Activity
             return true;
         }
 
-        int scanCode = event.getScanCode();
-        if (scanCode != 0) {
-            mNative.sendKey(0, scanCode);
-            return true;
-        }
-
-        // fallback: when scancode is 0 (e.g. Fn key combos), map via KeyCodeMapper
-        int evdev = KeyCodeMapper.getScanCode(keyCode);
-        if (evdev != -1) {
-            mNative.sendKey(0, evdev);
-            return true;
-        }
+        forwardKeyToLinux(event);
         return true;
     }
 
@@ -964,25 +1091,117 @@ public class MainActivity extends Activity
         if (event.getRepeatCount() > 0)
             return true;
 
-        int scanCode = event.getScanCode();
-        if (scanCode != 0 && event.getKeyCode() == KeyEvent.KEYCODE_UNKNOWN) {
-            // Some Fn combos deliver KEYCODE_UNKNOWN with a valid scancode
-            mNative.sendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, scanCode);
+        if (isSystemBarLockEnabled() && isEmergencyExitShortcut(event)) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN)
+                emergencyUnlockAndOpenSettings();
             return true;
         }
 
-        int evdev = KeyCodeMapper.getScanCode(event.getKeyCode());
-        if (evdev != -1) {
-            mNative.sendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, evdev);
-            return true;
-        }
+        return forwardKeyToLinux(event);
+    }
 
-        // If both keyCode and scancode are unknown, store/replay raw scancode anyway
-        if (scanCode != 0) {
-            mNative.sendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, scanCode);
-            return true;
-        }
+    boolean handleEmergencyExitShortcut(KeyEvent event) {
+        if (!isSystemBarLockEnabled() || !isEmergencyExitShortcut(event))
+            return false;
+        if (event.getAction() == KeyEvent.ACTION_DOWN)
+            emergencyUnlockAndOpenSettings();
         return true;
+    }
+
+    public boolean shouldAccessibilityIntercept(KeyEvent event) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        if (!prefs.getBoolean(KEY_ACCESSIBILITY_ENABLED, false))
+            return false;
+
+        int keyCode = event.getKeyCode();
+        if (isSystemBarLockEnabled() && isEmergencyExitShortcut(event))
+            return true;
+        if (keyCode == KeyEvent.KEYCODE_FUNCTION
+                || (keyCode >= KeyEvent.KEYCODE_F1 && keyCode <= KeyEvent.KEYCODE_F12)
+                || (keyCode >= KeyEvent.KEYCODE_F13 && keyCode <= KeyEvent.KEYCODE_F24)
+                || (keyCode == KeyEvent.KEYCODE_UNKNOWN && event.getScanCode() != 0)) {
+            return prefs.getBoolean(Prefs.INTERCEPT_FUNCTION_KEYS, true);
+        }
+        if (keyCode == KeyEvent.KEYCODE_META_LEFT
+                || keyCode == KeyEvent.KEYCODE_META_RIGHT
+                || keyCode == KeyEvent.KEYCODE_SEARCH
+                || keyCode == KeyEvent.KEYCODE_ASSIST) {
+            return prefs.getBoolean(Prefs.INTERCEPT_META_KEYS, true);
+        }
+        if (keyCode == KeyEvent.KEYCODE_ESCAPE || keyCode == KeyEvent.KEYCODE_BACK) {
+            return prefs.getBoolean(Prefs.INTERCEPT_ESCAPE_KEYS, true)
+                    || (event.isAltPressed()
+                    && prefs.getBoolean(Prefs.INTERCEPT_DESKTOP_SHORTCUTS, true));
+        }
+        if (keyCode == KeyEvent.KEYCODE_TAB
+                || keyCode == KeyEvent.KEYCODE_ALT_LEFT
+                || keyCode == KeyEvent.KEYCODE_ALT_RIGHT) {
+            return prefs.getBoolean(Prefs.INTERCEPT_DESKTOP_SHORTCUTS, true);
+        }
+        return false;
+    }
+
+    private static boolean isConfigurableInterceptKey(KeyEvent event) {
+        int keyCode = event.getKeyCode();
+        return keyCode == KeyEvent.KEYCODE_FUNCTION
+                || (keyCode >= KeyEvent.KEYCODE_F1 && keyCode <= KeyEvent.KEYCODE_F12)
+                || (keyCode >= KeyEvent.KEYCODE_F13 && keyCode <= KeyEvent.KEYCODE_F24)
+                || (keyCode == KeyEvent.KEYCODE_UNKNOWN && event.getScanCode() != 0)
+                || keyCode == KeyEvent.KEYCODE_META_LEFT
+                || keyCode == KeyEvent.KEYCODE_META_RIGHT
+                || keyCode == KeyEvent.KEYCODE_SEARCH
+                || keyCode == KeyEvent.KEYCODE_ASSIST
+                || keyCode == KeyEvent.KEYCODE_ESCAPE
+                || keyCode == KeyEvent.KEYCODE_BACK
+                || keyCode == KeyEvent.KEYCODE_TAB
+                || keyCode == KeyEvent.KEYCODE_ALT_LEFT
+                || keyCode == KeyEvent.KEYCODE_ALT_RIGHT;
+    }
+
+    private boolean forwardKeyToLinux(KeyEvent event) {
+        int keyCode = event.getKeyCode();
+        int action = event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1;
+        int evdev = -1;
+
+        if (isStandardMappedKey(keyCode))
+            evdev = KeyCodeMapper.getScanCode(keyCode);
+
+        if (evdev == -1 && event.getScanCode() != 0)
+            evdev = event.getScanCode();
+
+        if (evdev == -1)
+            evdev = KeyCodeMapper.getScanCode(keyCode);
+
+        if (isSpecialKey(keyCode)) {
+            Log.d("AnlandKeys", "keyCode=" + KeyEvent.keyCodeToString(keyCode)
+                    + " scanCode=" + event.getScanCode()
+                    + " action=" + event.getAction()
+                    + " forwardedEvdev=" + evdev
+                    + " deviceId=" + event.getDeviceId());
+        }
+
+        if (evdev == -1)
+            return false;
+
+        mNative.sendKey(action, evdev);
+        return true;
+    }
+
+    private static boolean isStandardMappedKey(int keyCode) {
+        return keyCode == KeyEvent.KEYCODE_BACK
+                || keyCode == KeyEvent.KEYCODE_META_LEFT
+                || keyCode == KeyEvent.KEYCODE_META_RIGHT
+                || keyCode == KeyEvent.KEYCODE_SEARCH
+                || keyCode == KeyEvent.KEYCODE_ASSIST
+                || (keyCode >= KeyEvent.KEYCODE_F13 && keyCode <= KeyEvent.KEYCODE_F24);
+    }
+
+    private static boolean isSpecialKey(int keyCode) {
+        return isStandardMappedKey(keyCode)
+                || keyCode == KeyEvent.KEYCODE_ESCAPE
+                || keyCode == KeyEvent.KEYCODE_TAB
+                || keyCode == KeyEvent.KEYCODE_FUNCTION
+                || keyCode == KeyEvent.KEYCODE_UNKNOWN;
     }
 
     public boolean isAccessibilityInterceptEnabled() {
@@ -990,20 +1209,28 @@ public class MainActivity extends Activity
                 .getBoolean(KEY_ACCESSIBILITY_ENABLED, false);
     }
 
+    private void ensureAccessibilityService() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        if (mAccessibilityRootUpdating || KeyInterceptor.isLaunched()
+                || !prefs.getBoolean(KEY_ACCESSIBILITY_ENABLED, false)
+                || !prefs.getBoolean(KEY_USE_ROOT, true))
+            return;
+        mAccessibilityRootUpdating = true;
+        new Thread(() -> {
+            RootSettings.Result result = RootSettings.setAccessibilityEnabled(true);
+            if (!result.success)
+                Log.w(TAG, "automatic accessibility enable failed: " + result.message);
+            runOnUiThread(() -> mAccessibilityRootUpdating = false);
+        }, "AnlandAccessibilityEnsure").start();
+    }
+
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
-        int scanCode = event.getScanCode();
-        if (scanCode != 0) {
-            mNative.sendKey(1, scanCode);
-            return true;
-        }
-
-        // fallback: when scancode is 0, map via KeyCodeMapper
-        int evdev = KeyCodeMapper.getScanCode(keyCode);
-        if (evdev != -1) {
-            mNative.sendKey(1, evdev);
-            return true;
-        }
+        if (isAccessibilityInterceptEnabled()
+                && isConfigurableInterceptKey(event)
+                && !shouldAccessibilityIntercept(event))
+            return super.onKeyUp(keyCode, event);
+        forwardKeyToLinux(event);
         return true;
     }
 
@@ -1125,5 +1352,4 @@ public class MainActivity extends Activity
         }
         return false;
     }
-
 }

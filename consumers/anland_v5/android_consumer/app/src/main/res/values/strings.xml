@@ -11,6 +11,8 @@
     <string name="section_connection">Connection</string>
     <string name="section_resolution">Display Resolution</string>
     <string name="section_notification">Settings Notification</string>
+    <string name="section_hardware_interception">Hardware Key Interception</string>
+    <string name="section_system_bar_lock">Locked Desktop Mode</string>
 
     <!-- Settings home: category rows and back navigation -->
     <string name="nav_back">‹ Back</string>
@@ -21,7 +23,7 @@
     <string name="cat_connection_subtitle">Socket, root, mic, camera &amp; audio latency</string>
     <string name="cat_resolution_subtitle">Output resolution &amp; presets</string>
     <string name="cat_general_title">General</string>
-    <string name="cat_general_subtitle">Settings notification</string>
+    <string name="cat_general_subtitle">Locked desktop mode &amp; settings notification</string>
 
     <!-- Bind key -->
     <string name="bind_key_button">Bind Virtual Keyboard Key</string>
@@ -33,6 +35,17 @@
     <!-- Accessibility -->
     <string name="accessibility_switch">Accessibility Key Interception</string>
     <string name="accessibility_hint">Intercept function keys (Fn, F1-F12 etc.) via AccessibilityService. Enable this if external keyboard Fn combos don\'t reach the desktop. Requires Accessibility permission granted in system Settings &gt; Accessibility (one-time).</string>
+    <string name="intercept_function_keys">Fn and function keys (F1-F24)</string>
+    <string name="intercept_meta_keys">Meta / Search / Assist</string>
+    <string name="intercept_escape_keys">Esc / hardware Back as Esc</string>
+    <string name="intercept_desktop_shortcuts">Desktop shortcuts (Tab, Alt combinations)</string>
+    <string name="accessibility_status_disabled">Interception is disabled</string>
+    <string name="accessibility_status_manual">Enable Anland KeyInterceptor in Android Accessibility settings</string>
+    <string name="accessibility_status_enabled">Anland KeyInterceptor is enabled</string>
+    <string name="accessibility_status_enabling_root">Enabling with root…</string>
+    <string name="accessibility_status_root_enabled">Enabled automatically with root</string>
+    <string name="accessibility_status_root_failed">Root enable failed: %1$s</string>
+    <string name="accessibility_open_failed">Could not open Accessibility settings</string>
 
     <!-- Extra keys bar -->
     <string name="extra_keys_switch">Extra Keys Bar (special keys)</string>
@@ -86,6 +99,12 @@
     <string name="notification_channel_desc">Anland quick access</string>
     <string name="notification_title">Anland</string>
     <string name="notification_text">Tap to open Settings</string>
+
+    <!-- Android system bar lock -->
+    <string name="system_bar_lock_switch">Lock Android system UI while controlling desktop</string>
+    <string name="system_bar_lock_hint">Uses root to block the status bar, taskbar, Home, Recents and edge gestures while Anland is focused. ColorOS Game Space is temporarily disabled to remove its floating bar, then restored on exit. Emergency exit: tap with five fingers, press F24, or press Ctrl+Alt+Shift+Esc.</string>
+    <string name="system_bar_lock_requires_root">Enable root connection to use locked desktop mode.</string>
+    <string name="lock_mode_released">Locked mode released; Android controls restored</string>
 
     <!-- Toasts -->
     <string name="toast_no_picker">No file picker available</string>

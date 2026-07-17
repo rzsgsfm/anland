@@ -2,57 +2,25 @@ package com.anland.consumer;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
-import android.content.Context;
-import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
-import android.provider.Settings;
 import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
 
 import java.util.LinkedHashSet;
 
 public class KeyInterceptor extends AccessibilityService {
-    private static final String PREFS_NAME = "anland_settings";
-    private static final String KEY_ACCESSIBILITY_ENABLED = "accessibility_key_intercept";
-
     LinkedHashSet<Integer> pressedKeys = new LinkedHashSet<>();
 
     private static final Handler handler = new Handler(Looper.getMainLooper());
     private static KeyInterceptor self;
-    private static boolean launchedAutomatically = false;
     private boolean enabled = false;
 
     public KeyInterceptor() {
         self = this;
     }
 
-    public static void launch(Context ctx) {
-        try {
-            String service = "com.anland.consumer/.KeyInterceptor";
-            String enabled = Settings.Secure.getString(ctx.getContentResolver(),
-                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-
-            if (enabled == null || enabled.isEmpty())
-                enabled = service;
-            else if (!enabled.contains(service))
-                enabled += ":" + service;
-
-            Settings.Secure.putString(ctx.getContentResolver(),
-                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, enabled);
-            Settings.Secure.putString(ctx.getContentResolver(),
-                    Settings.Secure.ACCESSIBILITY_ENABLED, "1");
-            launchedAutomatically = true;
-        } catch (SecurityException e) {
-            android.util.Log.w("KeyInterceptor", "No WRITE_SECURE_SETTINGS permission", e);
-            // User must enable via system Settings > Accessibility manually
-        }
-    }
-
-    public static void shutdown(boolean onlyIfEnabledAutomatically) {
-        if (onlyIfEnabledAutomatically && !launchedAutomatically)
-            return;
-
+    public static void shutdown() {
         if (self != null) {
             self.disableSelf();
             self.pressedKeys.clear();
@@ -69,10 +37,18 @@ public class KeyInterceptor extends AccessibilityService {
     private static void disableImmediately() {
         if (self == null) return;
         android.util.Log.d("KeyInterceptor", "disabling interception service");
-        self.setServiceInfo(new AccessibilityServiceInfo() {{
-            flags = DEFAULT;
-        }});
+        AccessibilityServiceInfo info = self.getServiceInfo();
+        info.flags &= ~AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
+        self.setServiceInfo(info);
         self.enabled = false;
+    }
+
+    @Override
+    protected void onServiceConnected() {
+        super.onServiceConnected();
+        self = this;
+        android.util.Log.d("KeyInterceptor", "service connected");
+        recheck();
     }
 
     public static void recheck() {
@@ -82,9 +58,9 @@ public class KeyInterceptor extends AccessibilityService {
             if (shouldBeEnabled) {
                 handler.removeCallbacks(disableImmediatelyCallback);
                 android.util.Log.d("KeyInterceptor", "enabling interception service");
-                self.setServiceInfo(new AccessibilityServiceInfo() {{
-                    flags = FLAG_REQUEST_FILTER_KEY_EVENTS;
-                }});
+                AccessibilityServiceInfo info = self.getServiceInfo();
+                info.flags |= AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
+                self.setServiceInfo(info);
                 self.enabled = true;
             } else {
                 handler.postDelayed(disableImmediatelyCallback, 120000);
@@ -99,20 +75,27 @@ public class KeyInterceptor extends AccessibilityService {
         if (instance == null)
             return false;
 
+        // Emergency unlock must remain available even if a SystemUI overlay stole
+        // focus while locked mode was active.
+        if (instance.handleEmergencyExitShortcut(event))
+            return true;
+
         // Only intercept keys when the activity is in foreground and has focus
         if (!instance.hasWindowFocus())
             return false;
 
-        boolean intercept = instance.isAccessibilityInterceptEnabled();
-
+        int keyCode = event.getKeyCode();
+        boolean releaseTrackedKey = event.getAction() == KeyEvent.ACTION_UP
+                && pressedKeys.contains(keyCode);
+        boolean intercept = instance.shouldAccessibilityIntercept(event);
         boolean ret = false;
-        if (intercept || (event.getAction() == KeyEvent.ACTION_UP && pressedKeys.contains(event.getKeyCode())))
+        if (intercept || releaseTrackedKey)
             ret = instance.handleAccessibilityKey(event);
 
-        if (intercept && event.getAction() == KeyEvent.ACTION_DOWN)
-            pressedKeys.add(event.getKeyCode());
+        if (intercept && ret && event.getAction() == KeyEvent.ACTION_DOWN)
+            pressedKeys.add(keyCode);
         else if (event.getAction() == KeyEvent.ACTION_UP)
-            pressedKeys.remove(event.getKeyCode());
+            pressedKeys.remove(keyCode);
 
         recheck();
 

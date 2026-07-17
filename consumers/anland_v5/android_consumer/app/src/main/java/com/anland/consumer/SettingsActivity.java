@@ -10,6 +10,7 @@ import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.CountDownTimer;
+import android.provider.Settings;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.text.InputType;
@@ -40,15 +41,15 @@ import java.nio.charset.StandardCharsets;
 
 public class SettingsActivity extends Activity {
     private static final String TAG = "AnlandSettings";
-    private static final String PREFS_NAME = "anland_settings";
+    private static final String PREFS_NAME = Prefs.NAME;
     private static final String KEY_BOUND_KEYCODE = "bound_keycode";
     private static final String KEY_SOCKET_PATH = "socket_path";
-    private static final String KEY_USE_ROOT = "use_root";
+    private static final String KEY_USE_ROOT = Prefs.USE_ROOT;
     private static final String KEY_MIC_ENABLED = "mic_enabled";
     private static final String KEY_CAMERA_ENABLED = "camera_enabled";
     private static final String KEY_SPEAKER_LATENCY_MS = "speaker_latency_ms";
     private static final String KEY_MIC_LATENCY_MS = "mic_latency_ms";
-    private static final String KEY_ACCESSIBILITY_ENABLED = "accessibility_key_intercept";
+    private static final String KEY_ACCESSIBILITY_ENABLED = Prefs.ACCESSIBILITY_ENABLED;
     private static final String KEY_EXTRA_KEYS_ENABLED = "extra_keys_bar";
     private static final String KEY_AUTO_SHOW_EXTRA_KEYS = "auto_show_extra_keys";
     private static final String KEY_BACK_OPENS_EXTRA_KEYS = "back_opens_extra_keys";
@@ -100,6 +101,8 @@ public class SettingsActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        new Thread(() -> RootSettings.setSystemBarsBlocked(false),
+                "AnlandRestoreSystemBars").start();
         showHome();
     }
 
@@ -281,6 +284,7 @@ public class SettingsActivity extends Activity {
     private void showGeneralPage() {
         currentPage = Page.GENERAL;
         LinearLayout root = newPage(R.string.cat_general_title);
+        buildSystemBarSection(root);
         buildNotificationSection(root);
         setContent(root);
     }
@@ -324,20 +328,15 @@ public class SettingsActivity extends Activity {
     private void buildAccessibilitySection(LinearLayout root) {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
 
+        TextView header = sectionTitle(R.string.section_hardware_interception, 16);
+        header.setPadding(0, dp(20), 0, dp(8));
+        root.addView(header);
+
         Switch accessibilitySwitch = new Switch(this);
         accessibilitySwitch.setText(R.string.accessibility_switch);
         accessibilitySwitch.setTextSize(14);
         accessibilitySwitch.setPadding(0, dp(16), 0, 0);
         accessibilitySwitch.setChecked(prefs.getBoolean(KEY_ACCESSIBILITY_ENABLED, false));
-        accessibilitySwitch.setOnCheckedChangeListener((v, checked) -> {
-            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-                .putBoolean(KEY_ACCESSIBILITY_ENABLED, checked).apply();
-            if (checked) {
-                KeyInterceptor.launch(SettingsActivity.this);
-            } else {
-                KeyInterceptor.shutdown(false);
-            }
-        });
         root.addView(accessibilitySwitch);
 
         TextView accessibilityHint = new TextView(this);
@@ -346,6 +345,104 @@ public class SettingsActivity extends Activity {
         accessibilityHint.setTextColor(Color.GRAY);
         accessibilityHint.setPadding(0, dp(4), 0, dp(8));
         root.addView(accessibilityHint);
+
+        TextView status = new TextView(this);
+        status.setTextSize(12);
+        status.setPadding(dp(20), 0, 0, dp(6));
+        root.addView(status);
+
+        LinearLayout options = new LinearLayout(this);
+        options.setOrientation(LinearLayout.VERTICAL);
+        options.setPadding(dp(20), 0, 0, 0);
+        Switch functionKeys = interceptionSwitch(
+                R.string.intercept_function_keys, Prefs.INTERCEPT_FUNCTION_KEYS, prefs);
+        Switch metaKeys = interceptionSwitch(
+                R.string.intercept_meta_keys, Prefs.INTERCEPT_META_KEYS, prefs);
+        Switch escapeKeys = interceptionSwitch(
+                R.string.intercept_escape_keys, Prefs.INTERCEPT_ESCAPE_KEYS, prefs);
+        Switch shortcuts = interceptionSwitch(
+                R.string.intercept_desktop_shortcuts, Prefs.INTERCEPT_DESKTOP_SHORTCUTS, prefs);
+        options.addView(functionKeys);
+        options.addView(metaKeys);
+        options.addView(escapeKeys);
+        options.addView(shortcuts);
+        root.addView(options);
+
+        Switch[] children = {functionKeys, metaKeys, escapeKeys, shortcuts};
+        setSwitchGroupEnabled(children, accessibilitySwitch.isChecked());
+        updateAccessibilityStatus(status);
+        accessibilitySwitch.setOnCheckedChangeListener((v, checked) -> {
+            prefs.edit().putBoolean(KEY_ACCESSIBILITY_ENABLED, checked).apply();
+            setSwitchGroupEnabled(children, checked);
+            if (!checked) {
+                KeyInterceptor.shutdown();
+                status.setText(R.string.accessibility_status_disabled);
+                if (prefs.getBoolean(KEY_USE_ROOT, true))
+                    runAccessibilityRootChange(false, status, false);
+                return;
+            }
+            if (prefs.getBoolean(KEY_USE_ROOT, true)) {
+                status.setText(R.string.accessibility_status_enabling_root);
+                runAccessibilityRootChange(true, status, true);
+            } else {
+                openAccessibilitySettings();
+                status.setText(R.string.accessibility_status_manual);
+            }
+        });
+    }
+
+    private Switch interceptionSwitch(int labelRes, String key, SharedPreferences prefs) {
+        Switch toggle = new Switch(this);
+        toggle.setText(labelRes);
+        toggle.setTextSize(14);
+        toggle.setPadding(0, dp(6), 0, dp(2));
+        toggle.setChecked(prefs.getBoolean(key, true));
+        toggle.setOnCheckedChangeListener((v, checked) ->
+                prefs.edit().putBoolean(key, checked).apply());
+        return toggle;
+    }
+
+    private void setSwitchGroupEnabled(Switch[] switches, boolean enabled) {
+        for (Switch toggle : switches) {
+            toggle.setEnabled(enabled);
+            toggle.setAlpha(enabled ? 1f : 0.45f);
+        }
+    }
+
+    private void runAccessibilityRootChange(boolean enable, TextView status, boolean fallback) {
+        new Thread(() -> {
+            RootSettings.Result result = RootSettings.setAccessibilityEnabled(enable);
+            runOnUiThread(() -> {
+                if (result.success) {
+                    status.setText(enable
+                            ? R.string.accessibility_status_root_enabled
+                            : R.string.accessibility_status_disabled);
+                    if (enable) KeyInterceptor.recheck();
+                } else {
+                    status.setText(getString(R.string.accessibility_status_root_failed,
+                            result.message));
+                    if (fallback) openAccessibilitySettings();
+                }
+            });
+        }, "AnlandAccessibilityRoot").start();
+    }
+
+    private void openAccessibilitySettings() {
+        try {
+            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+        } catch (Exception e) {
+            Toast.makeText(this, R.string.accessibility_open_failed, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void updateAccessibilityStatus(TextView status) {
+        String enabled = Settings.Secure.getString(getContentResolver(),
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+        boolean active = enabled != null && java.util.Arrays.asList(enabled.split(":"))
+                .contains(RootSettings.ACCESSIBILITY_COMPONENT);
+        status.setText(active ? R.string.accessibility_status_enabled
+                : R.string.accessibility_status_manual);
+        status.setTextColor(active ? 0xFF2E7D32 : Color.GRAY);
     }
 
     private void buildExtraKeysSection(LinearLayout root) {
@@ -524,6 +621,49 @@ public class SettingsActivity extends Activity {
         notificationHint.setTextColor(Color.GRAY);
         notificationHint.setPadding(0, dp(4), 0, dp(8));
         root.addView(notificationHint);
+    }
+
+    private void buildSystemBarSection(LinearLayout root) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+
+        root.addView(sectionTitle(R.string.section_system_bar_lock, 16));
+
+        Switch block = new Switch(this);
+        block.setText(R.string.system_bar_lock_switch);
+        block.setTextSize(14);
+        block.setPadding(0, dp(8), 0, 0);
+        boolean enabled = prefs.getBoolean(Prefs.BLOCK_SYSTEM_BARS,
+                prefs.getBoolean(Prefs.LEGACY_CAPTURE_MOUSE_POINTER, false));
+        block.setChecked(enabled);
+        boolean rootEnabled = prefs.getBoolean(KEY_USE_ROOT, true);
+        block.setEnabled(rootEnabled);
+        block.setAlpha(rootEnabled ? 1f : 0.45f);
+        block.setOnCheckedChangeListener((v, checked) -> prefs.edit()
+                .putBoolean(Prefs.BLOCK_SYSTEM_BARS, checked)
+                .remove(Prefs.LEGACY_CAPTURE_MOUSE_POINTER)
+                .apply());
+        root.addView(block);
+        root.addView(hintText(rootEnabled
+                ? R.string.system_bar_lock_hint
+                : R.string.system_bar_lock_requires_root));
+    }
+
+    private TextView sectionTitle(int textRes, int topDp) {
+        TextView title = new TextView(this);
+        title.setText(textRes);
+        title.setTextSize(16);
+        title.setTypeface(null, Typeface.BOLD);
+        title.setPadding(0, dp(topDp), 0, dp(8));
+        return title;
+    }
+
+    private TextView hintText(int textRes) {
+        TextView hint = new TextView(this);
+        hint.setText(textRes);
+        hint.setTextSize(12);
+        hint.setTextColor(Color.GRAY);
+        hint.setPadding(0, dp(4), 0, dp(8));
+        return hint;
     }
 
     // ============================================================

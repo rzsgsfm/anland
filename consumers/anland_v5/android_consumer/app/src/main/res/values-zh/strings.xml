@@ -11,6 +11,8 @@
     <string name="section_connection">连接</string>
     <string name="section_resolution">显示分辨率</string>
     <string name="section_notification">设置通知</string>
+    <string name="section_hardware_interception">硬件按键拦截</string>
+    <string name="section_system_bar_lock">桌面锁定模式</string>
 
     <!-- Settings home: category rows and back navigation -->
     <string name="nav_back">‹ 返回</string>
@@ -21,7 +23,7 @@
     <string name="cat_connection_subtitle">套接字、root、麦克风、摄像头与音频延迟</string>
     <string name="cat_resolution_subtitle">输出分辨率与预设</string>
     <string name="cat_general_title">通用</string>
-    <string name="cat_general_subtitle">设置通知</string>
+    <string name="cat_general_subtitle">桌面锁定模式与设置通知</string>
 
     <!-- Bind key -->
     <string name="bind_key_button">绑定虚拟键盘按键</string>
@@ -33,6 +35,17 @@
     <!-- Accessibility -->
     <string name="accessibility_switch">无障碍按键拦截</string>
     <string name="accessibility_hint">通过无障碍服务拦截功能键（Fn、F1-F12 等）。如果外接键盘的 Fn 组合键无法传到桌面，请启用此项。需要在系统 设置 &gt; 无障碍 中授予无障碍权限（仅需一次）。</string>
+    <string name="intercept_function_keys">Fn 与功能键（F1-F24）</string>
+    <string name="intercept_meta_keys">Meta / 搜索 / 助手</string>
+    <string name="intercept_escape_keys">Esc / 将硬件返回键作为 Esc</string>
+    <string name="intercept_desktop_shortcuts">桌面快捷键（Tab、Alt 组合键）</string>
+    <string name="accessibility_status_disabled">按键拦截已关闭</string>
+    <string name="accessibility_status_manual">请在 Android 无障碍设置中启用 Anland KeyInterceptor</string>
+    <string name="accessibility_status_enabled">Anland KeyInterceptor 已启用</string>
+    <string name="accessibility_status_enabling_root">正在通过 Root 启用…</string>
+    <string name="accessibility_status_root_enabled">已通过 Root 自动启用</string>
+    <string name="accessibility_status_root_failed">Root 启用失败：%1$s</string>
+    <string name="accessibility_open_failed">无法打开无障碍设置</string>
 
     <!-- Extra keys bar -->
     <string name="extra_keys_switch">扩展按键栏（特殊按键）</string>
@@ -86,6 +99,12 @@
     <string name="notification_channel_desc">Anland 快速访问</string>
     <string name="notification_title">Anland</string>
     <string name="notification_text">点击进入设置</string>
+
+    <!-- Android system bar lock -->
+    <string name="system_bar_lock_switch">控制桌面时锁定 Android 系统界面</string>
+    <string name="system_bar_lock_hint">Anland 获得焦点时使用 Root 禁止状态栏、任务栏、主屏、最近任务及边缘手势。锁定期间会临时停用 ColorOS 游戏空间以移除悬浮栏，退出后自动恢复。紧急退出：五指同时点击、按 F24，或按 Ctrl+Alt+Shift+Esc。</string>
+    <string name="system_bar_lock_requires_root">请先启用 Root 连接，才能使用桌面锁定模式。</string>
+    <string name="lock_mode_released">锁定模式已解除，Android 控制已恢复</string>
 
     <!-- Toasts -->
     <string name="toast_no_picker">没有可用的文件选择器</string>
